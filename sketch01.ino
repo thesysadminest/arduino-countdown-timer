@@ -10,7 +10,7 @@ unsigned long time_delta;
 unsigned long time_end = 1684832400;
 
 bool update_whole_screen = true;
-unsigned long prev_screen_update;
+unsigned long last_screen_update_time;
 
 uint8_t rus_v[] = {0x0, 0x0, 0x1c, 0x12, 0x1c, 0x12, 0x1c, 0x0};
 uint8_t rus_D[] = {0x6, 0xa, 0xa, 0xa, 0xa, 0xa, 0x1f, 0x11};
@@ -40,9 +40,23 @@ uint8_t food_down[] = {0x0, 0x0, 0x0, 0x0, 0x4, 0xa, 0x4, 0x0};
 uint8_t snake_up_food[] = {0x1f, 0x1f, 0x1f, 0x1f, 0x4, 0xa, 0x4, 0x0};
 uint8_t snake_down_food[] = {0x0, 0x4, 0xa, 0x4, 0x1f, 0x1f, 0x1f, 0x1f};
 
-char screen_state = 4;
+uint8_t sieve_up[] = {0x15, 0xa, 0x15, 0xa, 0x0, 0x0, 0x0, 0x0};
+uint8_t sieve_down[] = {0x0, 0x0, 0x0, 0x0, 0x15, 0xa, 0x15, 0xa};
+uint8_t sieve_full[] = {0x15, 0xa, 0x15, 0xa, 0x15, 0xa, 0x15, 0xa};
+
+uint8_t snake_up_sieve[] = {0x1f, 0x1f, 0x1f, 0x1f, 0x15, 0xa, 0x15, 0xa};
+uint8_t snake_down_sieve[] = {0x15, 0xa, 0x15, 0xa, 0x1f, 0x1f, 0x1f, 0x1f};
+
+char screen_time_mode = 4;
 
 bool buttons_state[] = {false, false, false, false};
+
+void arr_copy (char* a[4][4], char* b[4][4]) {
+  for (char i = 0; i < 4; ++i)
+    for (char j = 0; j < 4; ++j)
+      a[i][j] = b[i][j];
+  return;
+}
 
 struct StupidBitBool {
   char data[16] = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
@@ -63,12 +77,152 @@ struct StupidBitBool {
   }
 };
 
+void lcd_setCursor_safe (char col, char row) {
+  if (row < 2) lcd.setCursor(col, row);
+  else lcd.setCursor(col - 4, row);
+  return;
+}
+
+void lcd_setCursor_safe_div2 (char col, char row) {
+  lcd_setCursor_safe (col, row / 2);
+  return;
+}
+
+
 StupidBitBool left, right, up, down;
-char snake_tail_col, snake_tail_row, snake_head_col, snake_head_row, food_col, food_row, snake_score;
+char snake_tail_col, snake_tail_row, snake_head_col, snake_head_row, old_snake_tail_col, old_snake_tail_row, food_col, food_row;
+unsigned long game_score;
+
+StupidBitBool tetris_field;
+bool tetris_figure[4][4];
+bool tetris_figure_prev[4][4];
+char tetris_figure_row, tetris_figure_col, tetris_figure_spes, tetris_figure_rotation;
+char tetris_figure_row_prev, tetris_figure_col_prev;
 
 
-void setup()
-{  
+bool tetris_figure_check_laid () {
+    for (char i = 0; i < 4; ++i) 
+        for (char j = 0; j < 4; ++j) {
+            if (tetris_figure[i][j]) {
+                if (tetris_figure_col + j >= 15) return true;
+                if (tetris_figure_col + j + 1 < 16 && tetris_figure_row + i < 8 &&
+                  tetris_field.getState(tetris_figure_col + j + 1, tetris_figure_row + i)) return true;
+            }
+        }
+    return false;
+}
+
+bool tetris_figure_check_collision () {
+    for (char i = 0; i < 4; ++i) {
+        for (char j = 0; j < 4; ++j) {
+            if (tetris_figure[i][j]) {
+                if (tetris_figure_col + j < 0 || tetris_figure_col + j >= 16) return true;
+                if (tetris_figure_row + i < 0 || tetris_figure_row + i >= 8) return true;
+                if (tetris_field.getState(tetris_figure_col + j, tetris_figure_row + i)) return true;
+            }
+        }
+    }
+    return false;
+}
+
+void tetris_figure_push_left (bool (&a)[4][4]) {
+  for (char j = 0; j < 3; ++j)
+    for (char i = 0; i < 4; ++i)
+      a[i][j] = a[i][j+1];
+  for (char i = 0; i < 4; ++i)
+    a[i][3] = false;
+  return;
+}
+
+void tetris_figure_push_right (bool (&a)[4][4]) {
+  for (char j = 2; j > -1; --j)
+    for (char i = 0; i < 4; ++i)
+      a[i][j] = a[i][j-1];
+  for (char i = 0; i < 4; ++i)
+    a[i][0] = false;
+  return;
+}
+
+void tetris_figure_push_up (bool (&a)[4][4]) {
+  for (char i = 0; i < 3; ++i) 
+    for (char j = 0; j < 4; ++j)
+      a[i][j] = a[i+1][j];
+  for (char j = 0; j < 4; ++j)
+    a[3][j] = false;
+  return;
+}
+
+void tetris_figure_push_down (bool (&a)[4][4]) {
+  for (char i = 2; i > -1; --i) 
+    for (char j = 0; j < 4; ++j)
+      a[i][j] = a[i-1][j];
+  for (char j = 0; j < 4; ++j)
+    a[0][j] = false;
+  return;
+}
+
+
+void tetris_figure_rotate_clockwise () {
+    bool b[4][4];
+    for (char i = 0; i < 4; ++i)
+        for (char j = 0; j < 4; ++j) {
+            b[j][3-i] = tetris_figure[i][j];
+        }
+    for (char i = 0; i < 4; ++i)
+        for (char j = 0; j < 4; ++j) 
+            tetris_figure[i][j] = b[i][j];
+            
+    ++tetris_figure_rotation;
+    if (tetris_figure_spes == 0) tetris_figure_rotation = 0;
+    if (tetris_figure_spes >= 1 && tetris_figure_spes <= 3 && tetris_figure_rotation >= 2) tetris_figure_rotation -= 2;
+    if (tetris_figure_spes >= 4 && tetris_figure_rotation >= 4) tetris_figure_rotation -= 4;
+
+    if (tetris_figure_spes == 1 && tetris_figure_rotation == 1) tetris_figure_push_left(tetris_figure);
+    if (tetris_figure_spes == 2 || tetris_figure_spes == 3) {
+      tetris_figure_push_left(tetris_figure);
+      if (tetris_figure_rotation == 0) 
+        tetris_figure_push_left(tetris_figure);
+    }
+    if (tetris_figure_spes >= 4) tetris_figure_push_left(tetris_figure);
+    return;
+}
+
+
+void tetris_figure_rotate_counterclockwise () {
+    bool b[4][4];
+    for (char i = 0; i < 4; ++i)
+        for (char j = 0; j < 4; ++j) {
+            b[3-j][i] = tetris_figure[i][j];
+        }
+    for (char i = 0; i < 4; ++i)
+        for (char j = 0; j < 4; ++j) 
+            tetris_figure[i][j] = b[i][j];
+            
+    --tetris_figure_rotation;
+    if (tetris_figure_spes == 0) tetris_figure_rotation = 0;
+    if (tetris_figure_spes >= 1 && tetris_figure_spes <= 3 && tetris_figure_rotation < 0) tetris_figure_rotation += 2;
+    if (tetris_figure_spes >= 4 && tetris_figure_rotation < 0) tetris_figure_rotation += 4;
+
+    if (tetris_figure_spes == 1 && tetris_figure_rotation == 0) tetris_figure_push_up(tetris_figure);
+    if (tetris_figure_spes == 2 || tetris_figure_spes == 3) {
+      tetris_figure_push_up(tetris_figure);
+      if (tetris_figure_rotation == 1) 
+        tetris_figure_push_up(tetris_figure);
+    }
+    if (tetris_figure_spes >= 4) tetris_figure_push_up(tetris_figure);
+    return;
+}
+
+void tetris_figure_initialize (bool (&a)[4][4], char q1, char q2, char q3, char q4) {
+    a[q1 / 4][q1 % 4] = true;
+    a[q2 / 4][q2 % 4] = true;
+    a[q3 / 4][q3 % 4] = true;
+    a[q4 / 4][q4 % 4] = true;
+    return;
+}
+
+
+void setup() {  
   pinMode(2, INPUT); // button_left
   pinMode(3, INPUT); // button_right
   pinMode(4, INPUT); // button_up
@@ -88,12 +242,17 @@ void setup()
 }
 
 void loop() {
-  transition();
+  /*transition();
   update_whole_screen = true;
-  timeLoop();
+  while (timeLoop());
   transition();
   snakeInit();
-  snakeLoop();
+  while (snakeLoop());
+  transition();
+  snakeEnd();*/
+  transition();
+  tetrisInit();
+  while (tetrisLoop());
   transition();
   snakeEnd();
 }
@@ -102,12 +261,12 @@ void lcd_clearLine(char line) {
   if (line <= 1) lcd.setCursor(0, line);
   else lcd.setCursor(-4, line);
   for (char i = 0; i < 16; ++i) lcd.write(' ');
+  
   if (line <= 1) lcd.setCursor(0, line);
   else lcd.setCursor(-4, line);
 }
 
 void esp01_printWithLcd(String command) {
-  //lcd_clearLine(2);
   lcd_clearLine(1);
   lcd.print(command);
   esp01.println(command);
@@ -164,9 +323,13 @@ void transition() {
   }
 }
 
+bool any_StupidBitBools (char col, char row) {
+    return left.getState(col, row) || right.getState(col, row) || up.getState(col, row) || down.getState(col, row);
+}
+
 bool timeInit() {
-  //time_local_last_sync = millis();
-  //return;
+  time_local_last_sync = millis();
+  return true;
   
   lcd.clear();
   
@@ -265,12 +428,11 @@ bool timeInit() {
   return true;
 }
 
-void timeLoop() {
-  while (true) {
+bool timeLoop() {
     if (update_whole_screen)
       { lcd.clear(); update_whole_screen = false; }
     else {
-      if (screen_state == 4)
+      if (screen_time_mode == 4)
         lcd.setCursor(-4, 2);
       else
         lcd.setCursor(-4, 3);
@@ -279,7 +441,7 @@ void timeLoop() {
 
     time_delta = time_end - ((millis() - time_local_last_sync) / 1000 + time);
   
-    if (screen_state != 4) {
+    if (screen_time_mode != 4) {
       lcd.createChar(0, rus_d);
       lcd.createChar(1, rus_p);
       lcd.createChar(2, rus_i);
@@ -300,7 +462,7 @@ void timeLoop() {
     }
 
     // days
-    if (screen_state == 0) { 
+    if (screen_time_mode == 0) { 
       lcd.createChar(5, rus_D);
       lcd.createChar(6, rus_n);
       lcd.createChar(7, rus_j);
@@ -314,7 +476,7 @@ void timeLoop() {
     }
     
     // hours
-    if (screen_state == 1) {
+    if (screen_time_mode == 1) {
       lcd.createChar(5, rus_CH);
       lcd.createChar(6, rus_v);
       lcd.setCursor(5, 0);
@@ -328,7 +490,7 @@ void timeLoop() {
     }
     
     // minutes
-    if (screen_state == 2) {
+    if (screen_time_mode == 2) {
       lcd.createChar(5, rus_M);
       lcd.createChar(6, rus_n);
       lcd.createChar(7, rus_t);
@@ -343,7 +505,7 @@ void timeLoop() {
     }
     
     // seconds
-    if (screen_state == 3) {
+    if (screen_time_mode == 3) {
       lcd.createChar(5, rus_k);
       lcd.createChar(6, rus_u);
       lcd.createChar(7, rus_n);
@@ -359,7 +521,7 @@ void timeLoop() {
     }
     
     // summary
-    if (screen_state == 4) {
+    if (screen_time_mode == 4) {
       lcd.createChar(0, rus_D);
       lcd.createChar(1, rus_p);
       lcd.createChar(2, rus_i);
@@ -412,10 +574,10 @@ void timeLoop() {
     }
 
     char update_state = 0;
-    unsigned long time_delay = (1000 - millis() + prev_screen_update) / 10;
+    unsigned long time_delay = (1000 - millis() + last_screen_update_time) / 10;
     if (time_delay < 0 || time_delay > 1000) time_delay = 0;
     for (char i = 0; i < 10; ++i) {
-      if (digitalRead(3) == LOW && !buttons_state[1]) return;
+      if (digitalRead(3) == LOW && !buttons_state[1]) return false;
       if (digitalRead(4) == LOW && !buttons_state[2]) { buttons_state[2] = true; update_state = -1; break; }
       if (digitalRead(5) == LOW && !buttons_state[3]) { buttons_state[3] = true; update_state = 1; break; }
       if (digitalRead(2) == HIGH ) buttons_state[0] = false;
@@ -425,14 +587,14 @@ void timeLoop() {
       delay(time_delay);
     }
 
-    prev_screen_update = millis();
+    last_screen_update_time = millis();
    
     if (update_state) update_whole_screen = true;
     
-    screen_state += update_state;
-    if (screen_state >= 5) screen_state = 0;
-    if (screen_state < 0) screen_state = 4;
-  }
+    screen_time_mode += update_state;
+    if (screen_time_mode >= 5) screen_time_mode = 0;
+    if (screen_time_mode < 0) screen_time_mode = 4;
+    return true;
 }
 
 void snakeInit() {
@@ -441,20 +603,22 @@ void snakeInit() {
   up = StupidBitBool();
   down = StupidBitBool();
   
-  left.setState(0, 0, true);
-  left.setState(1, 0, true);
-  left.setState(2, 0, true);
-  snake_tail_col = 2;
-  snake_tail_row = 0;
+  right.setState(1, 0, true);
+  right.setState(2, 0, true);
+  snake_head_col = 2;
   snake_head_row = 0;
-  snake_head_col = 0;
-  snake_score = 0;
+  snake_tail_col = 1;
+  snake_tail_row = 0;
+  old_snake_tail_row = 0;
+  old_snake_tail_col = 0;
+  
+  game_score = 0;
 
   randomSeed(time + millis());
   do {
       food_col = random(16);
       food_row = random(8);
-  } while (left.getState(food_col, food_row) || right.getState(food_col, food_row) || up.getState(food_col, food_row) || down.getState(food_col, food_row));
+  } while (any_StupidBitBools(food_col, food_row));
 
   lcd.createChar(0, snake_up);
   lcd.createChar(1, snake_down);
@@ -463,55 +627,68 @@ void snakeInit() {
   lcd.createChar(4, food_down);
   lcd.createChar(5, snake_up_food);
   lcd.createChar(6, snake_down_food);
+  
+  lcd.setCursor(1, 0);
+  lcd.write(0);
+  lcd.write(0);
   return;
 }
 
-void snakeLoop() {
-  while (true) {
-    lcd.clear();
+bool snakeLoop() {
+    if (old_snake_tail_row >= 0 && old_snake_tail_col >= 0) {
+        if (old_snake_tail_row < 4) lcd.setCursor(old_snake_tail_col, old_snake_tail_row / 2);
+        else lcd.setCursor(old_snake_tail_col - 4, old_snake_tail_row / 2);
+        lcd.write(' ');
+        
+        if (old_snake_tail_row % 2 == 0 && any_StupidBitBools(old_snake_tail_col, old_snake_tail_row + 1)) {
+            if (old_snake_tail_row < 4) lcd.setCursor(old_snake_tail_col, old_snake_tail_row / 2);
+            else lcd.setCursor(old_snake_tail_col - 4, old_snake_tail_row / 2);
+            lcd.write(1);
+        }
+        if (old_snake_tail_row % 2 == 1 && any_StupidBitBools(old_snake_tail_col, old_snake_tail_row - 1)) {
+            if (old_snake_tail_row < 4) lcd.setCursor(old_snake_tail_col, old_snake_tail_row / 2);
+            else lcd.setCursor(old_snake_tail_col - 4, old_snake_tail_row / 2);
+            lcd.write(0);
+        }
+    }
+    
+
+    if (snake_head_row < 4) lcd.setCursor(snake_head_col, snake_head_row / 2);
+    else lcd.setCursor(snake_head_col - 4, snake_head_row / 2);
+    if (snake_head_row % 2 == 0) lcd.write(0);
+    else lcd.write(1);
+    
+    if (snake_head_row % 2 == 0 && any_StupidBitBools(snake_head_col, snake_head_row + 1)) {
+        if (snake_head_row < 4) lcd.setCursor(snake_head_col, snake_head_row / 2);
+        else lcd.setCursor(snake_head_col - 4, snake_head_row / 2);
+        lcd.write(2);
+    }
+    if (snake_head_row % 2 == 1 && any_StupidBitBools(snake_head_col, snake_head_row - 1)) {
+        if (snake_head_row < 4) lcd.setCursor(snake_head_col, snake_head_row / 2);
+        else lcd.setCursor(snake_head_col - 4, snake_head_row / 2);
+        lcd.write(2);
+    }
 
     if (food_row < 4) lcd.setCursor(food_col, food_row / 2);
-    else lcd.setCursor(food_col-4, food_row / 2);
+    else lcd.setCursor(food_col - 4, food_row / 2);
     if (food_row % 2 == 0) lcd.write(3);
     else lcd.write(4);
-
-    bool prev = false;
-    for (char col = 0; col < 16; ++col) 
-    for (char row = 0; row < 8; ++row) {
-      if (left.getState(col, row) || right.getState(col, row) || up.getState(col, row) || down.getState(col, row)) {
-        if (row < 4) lcd.setCursor(col, row / 2);
-        else lcd.setCursor(col-4, row / 2);
-        if (prev) {
-          lcd.write(2);
-        }
-        else {
-          if (row % 2 == 0) lcd.write(0);
-          else lcd.write(1);
-        }
-        if (row % 2 == 0) prev = true;
-        else prev = false;
-      }
-      else {
-        prev = false;
-      }
+        
+    if (food_row % 2 == 0 && any_StupidBitBools(food_col, food_row + 1)) {
+        if (food_row < 4) lcd.setCursor(food_col, food_row / 2);
+        else lcd.setCursor(food_col - 4, food_row / 2);
+        lcd.write(6);
     }
-    if (food_row % 2 == 0 && 
-    (left.getState(food_col, food_row+1) || right.getState(food_col, food_row+1) || up.getState(food_col, food_row+1) || down.getState(food_col, food_row+1))) {
-      if (food_row < 4) lcd.setCursor(food_col, food_row / 2);
-      else lcd.setCursor(food_col-4, food_row / 2);
-      lcd.write(6);
+    if (food_row % 2 == 1 && any_StupidBitBools(food_col, food_row - 1)) {
+        if (food_row < 4) lcd.setCursor(food_col, food_row / 2);
+        else lcd.setCursor(food_col - 4, food_row / 2);
+        lcd.write(5);
     }
-    else if (food_row % 2 != 0 && 
-    (left.getState(food_col, food_row-1) || right.getState(food_col, food_row-1) || up.getState(food_col, food_row-1) || down.getState(food_col, food_row-1))) {
-      if (food_row < 4) lcd.setCursor(food_col, food_row / 2);
-      else lcd.setCursor(food_col-4, food_row / 2);
-      lcd.write(5);
-    }
-
+    
 
     char update = 0; // LRUD <---> 1234
     for (char i = 0; i < 4; ++i) {
-        if (digitalRead(2) == LOW && digitalRead(3) == LOW && digitalRead(4) == LOW && digitalRead(5) == LOW) { delay(1000); return; }
+        if (digitalRead(2) == LOW && digitalRead(3) == LOW && digitalRead(4) == LOW && digitalRead(5) == LOW) { delay(1000); return false; }
         if (digitalRead(2) == LOW && !buttons_state[0] && !right.getState(snake_head_col, snake_head_row)) { update = 1; buttons_state[0] = true; }
         if (digitalRead(3) == LOW && !buttons_state[1] && !left.getState(snake_head_col, snake_head_row)) { update = 2; buttons_state[1] = true; }
         if (digitalRead(4) == LOW && !buttons_state[2] && !down.getState(snake_head_col, snake_head_row)) { update = 3; buttons_state[2] = true; }
@@ -521,7 +698,7 @@ void snakeLoop() {
         if (digitalRead(3) == HIGH) buttons_state[1] = false;
         if (digitalRead(4) == HIGH) buttons_state[2] = false;
         if (digitalRead(5) == HIGH) buttons_state[3] = false;
-        delay(max(100 - 5 * snake_score, 3));
+        delay(max(100 - 5 * game_score, 3));
 
     }
     if (update != 0) {
@@ -558,6 +735,9 @@ void snakeLoop() {
         head_state = 4;
     }
 
+    old_snake_tail_row = snake_tail_row;
+    old_snake_tail_col = snake_tail_col;
+
     if (snake_head_col != food_col || snake_head_row != food_row) {
       if (left.getState(snake_tail_col, snake_tail_row)) {
           left.setState(snake_tail_col, snake_tail_row, false);
@@ -581,23 +761,24 @@ void snakeLoop() {
       }
     }
     else {
-      ++snake_score;
+      old_snake_tail_row = -1;
+      old_snake_tail_col = -1;
+      ++game_score;
       do {
         food_col = random(16);
         food_row = random(8);
-      } while (left.getState(food_col, food_row) || right.getState(food_col, food_row) || up.getState(food_col, food_row) || down.getState(food_col, food_row));
+      } while (any_StupidBitBools(food_col, food_row));
     }
 
-    if (left.getState(snake_head_col, snake_head_row) || right.getState(snake_head_col, snake_head_row) || 
-    up.getState(snake_head_col, snake_head_row) || down.getState(snake_head_col, snake_head_row)) 
-      { delay(1000); return; }
+    if (any_StupidBitBools(snake_head_col, snake_head_row)) 
+      { delay(1000); return false; }
       
     if (head_state == 0) {false;}
     if (head_state == 1) left.setState(snake_head_col, snake_head_row, true);
     if (head_state == 2) right.setState(snake_head_col, snake_head_row, true);
     if (head_state == 3) up.setState(snake_head_col, snake_head_row, true);
     if (head_state == 4) down.setState(snake_head_col, snake_head_row, true);
-  }
+    return true;
 }
 
 void snakeEnd() {
@@ -631,14 +812,272 @@ void snakeEnd() {
 
       lcd.setCursor(3, 3);
 
-      lcd.print(String((int) snake_score));
+      lcd.print(String((int) game_score));
 
-      while (true) {
+      while (true) 
           if (digitalRead(2) == LOW || digitalRead(3) == LOW || digitalRead(4) == LOW || digitalRead(5) == LOW) 
               { for (char i = 0; i < 4; ++i) buttons_state[i] = true; return; }
-          }
-          delay(100);
+          
+      delay(100);
+}
+
+void tetrisInit () {
+    tetris_field = StupidBitBool();
+    tetris_figure_spes = -1;
+    game_score = 0;
+
+    lcd.clear();
+    lcd.createChar(0, snake_up);
+    lcd.createChar(1, snake_down);
+    lcd.createChar(2, snake_full);
+    lcd.createChar(3, sieve_up);
+    lcd.createChar(4, sieve_down);
+    lcd.createChar(5, sieve_full);
+    lcd.createChar(6, snake_up_sieve);
+    lcd.createChar(7, snake_down_sieve);
+    randomSeed(time + millis());
+}
+
+bool tetrisLoop () {
+    tetris_figure_spes = random(7);
+    tetris_figure_rotation = 0;
+
+    tetris_figure_col = 0;
+    tetris_figure_row = 2;
+    tetris_figure_col_prev = -10;
+    tetris_figure_row_prev = -10;
+
+    /*for (char i = 0; i < random(4); ++i) 
+        tetris_figure_rotate_counterclockwise(tetris_figure);*/
+
+    for (char i = 0; i < 4; ++i)
+      for (char j = 0; j < 4; ++j) {
+        tetris_figure[i][j] = false;
+        tetris_figure_prev[i][j] = false;
+      }
+        
+    if (tetris_figure_spes == 0) tetris_figure_initialize (tetris_figure, 5, 6, 9, 10);
+    else if (tetris_figure_spes == 1) tetris_figure_initialize (tetris_figure, 4, 5, 6, 7);
+    else if (tetris_figure_spes == 2) tetris_figure_initialize (tetris_figure, 0, 4, 5, 9);
+    else if (tetris_figure_spes == 3) tetris_figure_initialize (tetris_figure, 1, 4, 5, 8);
+    else if (tetris_figure_spes == 4) tetris_figure_initialize (tetris_figure, 1, 2, 6, 10);
+    else if (tetris_figure_spes == 5) tetris_figure_initialize (tetris_figure, 0, 1, 4, 8);
+    else if (tetris_figure_spes == 6) tetris_figure_initialize (tetris_figure, 1, 4, 5, 9);
+
+    bool tetris_figure_collided = tetris_figure_check_collision();
+    char figure_update = 0; // CW CCW U D
+    bool tetris_figure_falling = true;
+    while (tetris_figure_falling) {
+      if (tetris_figure_check_laid()) {
+          tetris_figure_falling = false;
+          for (char i = 0; i < 4; ++i)
+            for (char j = 0; j < 4; ++j) 
+              if (tetris_figure[i][j]) 
+                tetris_field.setState(tetris_figure_col + j, tetris_figure_row + i, true);
+              
+      }
+      else {
+          ++tetris_figure_col;
+          ++game_score;
       }
 
+      char redraws_count = 10;
+      redraw_tetris_figure:
+      
+      if (tetris_figure_row_prev >= -10 && tetris_figure_col_prev >= -10) {
+          for (char i = 0; i < 4; ++i) 
+              for (char j = 0; j < 4; ++j) 
+                  if (tetris_figure_prev[i][j]) {
+                      lcd_setCursor_safe_div2(tetris_figure_col_prev + j, tetris_figure_row_prev + i);
+                      if ((tetris_figure_row_prev + i) % 2 == 0) {
+                          if (tetris_figure_row_prev + i + 1 < 16 && tetris_field.getState(tetris_figure_col_prev + j, tetris_figure_row_prev + i + 1)) 
+                              lcd.write(4);
+                          else 
+                              lcd.write(' ');
+                      }
+                      else {
+                          if (tetris_figure_row_prev + i - 1 >= 0 && tetris_field.getState(tetris_figure_col_prev + j, tetris_figure_row_prev + i - 1)) 
+                              lcd.write(3);
+                          else 
+                              lcd.write(' ');
+                      }
+                  }
+      }
 
- 
+      if (tetris_figure_falling) {
+          for (char i = 0; i < 4; ++i) 
+              for (char j = 0; j < 4; ++j) 
+                  if (tetris_figure[i][j]) {
+                    lcd_setCursor_safe_div2(tetris_figure_col + j, tetris_figure_row + i);
+                    if ((tetris_figure_row + i) % 2 == 0) {
+                        if (i < 3 && tetris_figure[i+1][j]) { }
+                            
+                        else if (tetris_figure_row + i + 1 < 16 && tetris_field.getState(tetris_figure_col + j, tetris_figure_row + i + 1)) 
+                            lcd.write(6);
+                        else 
+                            lcd.write(0);
+                    }
+                    else {
+                        if (i > 0 && tetris_figure[i-1][j]) 
+                            lcd.write(2);
+                        else if (tetris_figure_row + i - 1 >= 0 && tetris_field.getState(tetris_figure_col + j, tetris_figure_row + i - 1)) 
+                            lcd.write(7);
+                        else 
+                            lcd.write(1);
+                    }
+                  }
+      }
+      else { 
+          for (char i = 0; i < 4; ++i) 
+              for (char j = 0; j < 4; ++j) 
+                  if (tetris_figure[i][j]) {
+                      lcd_setCursor_safe_div2(tetris_figure_col + j, tetris_figure_row + i);
+                      if ((tetris_figure_row + i) % 2 == 0) {
+                          if (tetris_figure_row + i + 1 < 16 && tetris_field.getState(tetris_figure_col + j, tetris_figure_row + i + 1)) 
+                              lcd.write(5);
+                          else 
+                              lcd.write(3);
+                      }
+                      else {
+                          if (tetris_figure_row + i - 1 >= 0 && tetris_field.getState(tetris_figure_col + j, tetris_figure_row + i - 1)) 
+                              lcd.write(5);
+                          else 
+                              lcd.write(4);
+                      }
+                  }
+      }
+
+      if (tetris_figure_collided)
+          return false;
+
+      tetris_figure_row_prev = tetris_figure_row;
+      tetris_figure_col_prev = tetris_figure_col;
+      for (char i = 0; i < 4; ++i) 
+        for (char j = 0; j < 4; ++j) 
+          tetris_figure_prev[i][j] = tetris_figure[i][j];
+
+      while (redraws_count >= 0) {
+          --redraws_count;
+          delay(100);
+          figure_update = 0;
+          if (digitalRead(2) == LOW && !buttons_state[0]) { buttons_state[0] = true; figure_update |= (1 << 3); }
+          if (digitalRead(3) == LOW /*&& !buttons_state[1]*/) { buttons_state[1] = true; figure_update |= (1 << 2); }
+          if (digitalRead(4) == LOW /*&& !buttons_state[2]*/) { buttons_state[2] = true; figure_update |= (1 << 1); }
+          if (digitalRead(5) == LOW /*&& !buttons_state[3]*/) { buttons_state[3] = true; figure_update |= (1 << 0); }
+
+          if (digitalRead(2) == HIGH) buttons_state[0] = false;
+          if (digitalRead(3) == HIGH) buttons_state[1] = false;
+          if (digitalRead(4) == HIGH) buttons_state[2] = false;
+          if (digitalRead(5) == HIGH) buttons_state[3] = false;
+          
+          if (figure_update == 0) continue;
+
+          if (figure_update & (1 << 3))  // rotate CCW
+              tetris_figure_rotate_counterclockwise ();
+
+          if (figure_update & (1 << 2))  // move right
+              { ++tetris_figure_col; ++game_score; }
+          
+          if (figure_update & (1 << 1))  // move up
+              --tetris_figure_row;
+          
+          if (figure_update & (1 << 0))  // move down
+              ++tetris_figure_row;
+
+          if (tetris_figure_check_collision()) {
+              if (figure_update & (1 << 3))
+                tetris_figure_rotate_clockwise ();
+
+              if (figure_update & (1 << 2))
+                 { --tetris_figure_col; --game_score; }
+          
+              if (figure_update & (1 << 1))
+                  ++tetris_figure_row;
+              
+              if (figure_update & (1 << 0))
+                  --tetris_figure_row;
+          }
+          else {
+              goto redraw_tetris_figure;
+          }
+      }
+    }
+
+    bool full_cols[16];
+    for (char i = 0; i < 16; ++i) full_cols[i] = false;
+    
+    for (char i = 0; i < 16; ++i) {
+        bool flag = true;
+        for (char j = 0; j < 8; ++j) {
+            if (!tetris_field.getState(i, j)) flag = false;
+        }
+        if (flag) full_cols[i] = true;
+    }
+
+    char mul = 0;
+    bool flag = false;
+    for (char i = 0; i < 16; ++i) {
+        if (full_cols[i]) { 
+          flag = true; 
+          ++mul;
+        }
+        else if (mul) {
+            if (mul == 1) game_score += 100;
+            if (mul == 2) game_score += 300;
+            if (mul == 3) game_score += 700;
+            else game_score += 1500;
+            mul = 0;
+        }
+    }
+
+    if (!flag) return true;
+
+    if (mul == 1) game_score += 100;
+    else if (mul == 2) game_score += 300;
+    else if (mul == 3) game_score += 700;
+    else if (mul >= 4) game_score += 1500;
+            
+    for (char i = 3; i > -1; --i) {
+        for (char j = 0; j < 16; ++j) {
+            if (full_cols[j]) {
+                tetris_field.setState(j, i, false);
+                tetris_field.setState(j, 7-i, false);
+                lcd_setCursor_safe_div2(j, i);
+                if (i % 2 == 0) lcd.write(' ');
+                else lcd.write(3);
+                lcd_setCursor_safe_div2(j, 7-i);
+                if ((7-i) % 2 == 0) lcd.write(4);
+                else lcd.write(' ');
+            }
+        }
+        delay(80);
+    }
+    for (char q = 0; q < 16; ++q) {
+        if (full_cols[q]) {
+            for (char i = q; i > 0; --i) {
+                for (char j = 0; j < 8; ++j) 
+                    tetris_field.setState(i, j, tetris_field.getState(i-1, j));
+                for (char j = 0; j < 8; ++j) 
+                    tetris_field.setState(0, j, false);
+                for (char j = 1; j < 8; j += 2) {
+                    lcd_setCursor_safe_div2(i, j);
+                    if (tetris_field.getState(i, j)) {
+                        if (tetris_field.getState(i, j-1)) 
+                            lcd.write(5);
+                        else 
+                            lcd.write(4);
+                    }
+                    else {
+                        if (tetris_field.getState(i, j-1)) 
+                            lcd.write(3);
+                        else 
+                            lcd.write(' ');
+                    }
+                }
+            }
+            delay(50);
+        }
+    }
+    
+    return true;
+}
